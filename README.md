@@ -1,2 +1,4 @@
 # puheg-SlowPost
-SlowPost - Transport sublayer over Puheg, behind MAC layer and the TCP/IP stack 
+SlowPost - File Transport sublayer over Puheg, behind MAC layer and the TCP/IP stack.
+
+Сетевой транспорт вырос из утилиты копирования файлов с компьютера на компьютер. Для пользователя весь процесс и выглядит как копирование файлов. Утилита создает дерево каталогов из IP-адресов имеющихся в адресной книге контактов, похоже на то, как это выглядит в электронной почте. Достаточно скопировать любой файл в SENDER_IP/outbox/RECIPT_IP/ - и через какое-то время он передастся на RECIPT_IP RECIPT_IP/inbox/SENDER_IP/
