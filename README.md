@@ -141,20 +141,22 @@ SlowPost — файловый транспортный подуровень, р�
 
 ### Пример
 
-Маршрут через одну промежуточную ноду, файл `a.pdf` (N=5), R=2:
+Маршрут через одну промежуточную ноду, файл `webserwer_responce.http` (N=23), R=2:
 
 ```
-50 57 01                  PW\x01
-46                        'F'
-02                        routeSize = 2
-06 55  06 54              route: 1621 → 1620
-06 55                     origin = 1621
-05                        nameSize = 5
-61 2E 70 64 66            "a.pdf"
-00 00 30 39               uuid = 12345
-03                        totalParts = 3
-01                        part = 1
-...                       content
+50 57 01                              PW\x01
+46                                    'F'
+02                                    routeSize = 2
+06 55  06 54                          route: 1621 → 1620
+06 55                                 origin = 1621
+17                                    nameSize = 23
+77 65 62 73 65 72 77 65 72 5F         "webserwer_"
+72 65 73 70 6F 6E 63 65 2E            "responce."
+68 74 74 70                           "http"
+00 00 30 39                           uuid = 12345
+04                                    totalParts = 4
+01                                    part = 1
+...                                   content
 ```
 
 ---
