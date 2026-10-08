@@ -1,5 +1,5 @@
 # puheg-SlowPost
-SlowPost - File Transport sublayer over Puheg, behind MAC layer and the TCP/IP stack.
+SlowPost - File Transport sublayer over the Puheg, behind its MAC layer and the OS's TCP/IP stack.
 
 Описание навайбкожено, требует исправления
 
