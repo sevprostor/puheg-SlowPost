@@ -98,6 +98,8 @@ public:
 
     std::string getPeerIpByUuid(uint32_t uuid) const;
 
+    bool moveForwardToSpool();
+
 private:
 
     static uint64_t fileTimeToEpoch(const fs::path& p);

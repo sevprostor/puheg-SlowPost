@@ -115,6 +115,46 @@ bool Words::parseCommand(const std::vector<uint8_t>& data, PwCommand& cmd) const
 }
 
 
+std::vector<uint8_t> Words::buildEnvelope(std::vector<uint16_t> route){
+
+    //берет исходный пакет и переписывает в нем маршрут
+
+    std::vector<uint8_t> envelope;
+
+    size_t routeSize = route.size();
+    if (routeSize > 255) routeSize = 255;
+
+    // Резервируем место:
+    // Magic(3) + Envelope(type(1) + routeSize(1) + route(N*2))
+
+    envelope.reserve(3 + 1 + 1 + (routeSize * 2));
+
+    // === Magic ===
+    // 3 bytes
+    envelope.push_back('P');
+    envelope.push_back('W');
+    envelope.push_back(0x01);
+
+    // === Envelope ===
+    // type (1 байт)
+    envelope.push_back('F'); // MultihopFile
+
+    // === Route (size 1 + route (адреса 16 бит, по 2 байта) ===
+    envelope.push_back(static_cast<uint8_t>(routeSize));
+
+    // === ЦИКЛ ЗАПИСИ МАРШРУТА ===
+    // Каждый адрес route[i] = uint16_t → 2 байта в big-endian
+    for (size_t i = 0; i < routeSize; ++i) {
+        uint16_t addr = route[i];
+        envelope.push_back(static_cast<uint8_t>((addr >> 8) & 0xFF)); // старший байт
+        envelope.push_back(static_cast<uint8_t>(addr & 0xFF));         // младший байт
+    }
+
+    return envelope;
+
+
+}
+
 std::vector<uint8_t> Words::buildMHFrame(const std::vector<uint16_t>& route, uint16_t origin, const std::string& name, uint32_t uuid, uint8_t totalParts, uint8_t part, const std::vector<uint8_t>& content){
 
     /*
@@ -122,6 +162,10 @@ std::vector<uint8_t> Words::buildMHFrame(const std::vector<uint16_t>& route, uin
 
     Offset  Size    Field
     ------  ----    -----
+    P
+    W
+    0x01
+    ----------------------
     0       1       type = 'F'
     1       1       routeSize (количество узлов в маршруте)
     2       2*N     route[0..N-1] — MAC-адреса, каждый по 2 байта big-endian
@@ -133,6 +177,8 @@ std::vector<uint8_t> Words::buildMHFrame(const std::vector<uint16_t>& route, uin
 
     */
 
+    std::vector<uint8_t> envelope = buildEnvelope(route);
+
     std::vector<uint8_t> frame;
 
     // Ограничение длины имени (поле 1 байт)
@@ -143,10 +189,18 @@ std::vector<uint8_t> Words::buildMHFrame(const std::vector<uint16_t>& route, uin
     if (routeSize > 255) routeSize = 255;
 
     // Резервируем место:
-    // Envelope(type(1) + routeSize(1) + route(N*2)) +
+    // Magic(3) + Envelope(type(1) + routeSize(1) + route(N*2)) +
     // Frame(origin(2) + nameSize(1) + name(N) + uuid(4) + parts(2) + content)
 
-    frame.reserve(1 + 1 + (routeSize * 2) + 2 + 1 + nameSize + 4 + 2 + content.size());
+    //frame.reserve(3 + 1 + 1 + (routeSize * 2) + 2 + 1 + nameSize + 4 + 2 + content.size());
+
+    frame.reserve(envelope.size() + 2 + 1 + nameSize + 4 + 2 + content.size());
+    /*
+    // === Magic ===
+    // 3 bytes
+    frame.push_back('P');
+    frame.push_back('W');
+    frame.push_back(0x01);
 
     // === Envelope ===
     // type (1 байт)
@@ -162,59 +216,11 @@ std::vector<uint8_t> Words::buildMHFrame(const std::vector<uint16_t>& route, uin
         frame.push_back(static_cast<uint8_t>((addr >> 8) & 0xFF)); // старший байт
         frame.push_back(static_cast<uint8_t>(addr & 0xFF));         // младший байт
     }
+    */
+    frame.insert(frame.begin(), envelope.begin(), envelope.end());
 
     /////////////////////////////////////////////////////////////////////
     /// По идее, именно отсюда должен начинаться шифрованный контент
-
-    // === origin (2 байта, big-endian) ===
-    frame.push_back(static_cast<uint8_t>((origin >> 8) & 0xFF));
-    frame.push_back(static_cast<uint8_t>(origin & 0xFF));
-
-    // === nameSize (1 байт) + name ===
-    frame.push_back(static_cast<uint8_t>(nameSize));
-    frame.insert(frame.end(), name.begin(), name.begin() + nameSize);
-
-    // === uuid (4 байта, big-endian) ===
-    frame.push_back(static_cast<uint8_t>((uuid >> 24) & 0xFF));
-    frame.push_back(static_cast<uint8_t>((uuid >> 16) & 0xFF));
-    frame.push_back(static_cast<uint8_t>((uuid >> 8)  & 0xFF));
-    frame.push_back(static_cast<uint8_t>(uuid & 0xFF));
-
-    // === totalParts (1 байт) + part (1 байт) ===
-    frame.push_back(totalParts);
-    frame.push_back(part);
-
-    // === content ===
-    frame.insert(frame.end(), content.begin(), content.end());
-
-    return frame;
-}
-
-
-std::vector<uint8_t> Words::buildFileFrame(
-    uint16_t finalDest,
-    uint16_t origin,
-    const std::string& name,
-    uint32_t uuid,
-    uint8_t totalParts,
-    uint8_t part,
-    const std::vector<uint8_t>& content)
-{
-    std::vector<uint8_t> frame;
-
-    // Ограничение длины имени (поле 1 байт)
-    size_t nameSize = name.size();
-    if (nameSize > 255) nameSize = 255;
-
-    // Резервируем место: Envelope(3) + origin(2) + nameSize(1) + name(N) + uuid(4) + parts(2) + content
-    frame.reserve(3 + 2 + 1 + nameSize + 4 + 2 + content.size());
-
-    // === Envelope ===
-    // type (1 байт)
-    frame.push_back('F');
-    // finalDest (2 байта, network order / big-endian)
-    frame.push_back(static_cast<uint8_t>((finalDest >> 8) & 0xFF));
-    frame.push_back(static_cast<uint8_t>(finalDest & 0xFF));
 
     // === origin (2 байта, big-endian) ===
     frame.push_back(static_cast<uint8_t>((origin >> 8) & 0xFF));

@@ -69,8 +69,7 @@ private:
         out << "\r\033[K";
 
         // 2. Выводим лог с меткой времени
-        out << std::put_time(&tm_buf, "%H:%M:%S") << "."
-            << std::setfill('0') << std::setw(3) << ms.count() << " "
+        out << std::put_time(&tm_buf, "%H:%M:%S") << " "
             << "[" << level << "] "
             << ss.str() << std::endl;
 

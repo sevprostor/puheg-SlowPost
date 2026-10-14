@@ -14,10 +14,12 @@ struct Config {
 
     // НОВОЕ: параметры отправки
     int sendTXDelay = 15000; // задержка между отправками (мс)
-    int maxProcessRetries = 5; // максимальное количество ретраев
-    int sendRetryDelay = 60; // ретраи раз в минуту
-    int sendProofDelay = 300;
-    uint16_t chunkSize = 2000;
+    int maxProcessRetries = 7; // максимальное количество ретраев
+    int sendRetryDelay = 90; // ретраи раз в 2 минуты
+    int sendProofDelay = 120; // пруф раз в 3 минуты
+    int compressionLevel = 6;
+
+    uint16_t chunkSize = 1500;
     uint8_t maxTransfers = 4;
 
     struct abc{

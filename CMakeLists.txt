@@ -1,11 +1,14 @@
 cmake_minimum_required(VERSION 3.5)
 
-project(PuhegWords-listener LANGUAGES CXX)
+project(Puheg-SlowPost LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(listenwords main.cpp
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(ZSTD REQUIRED libzstd)
+
+add_executable(slowpost main.cpp
     events.h
     events.cpp
     transport.h
@@ -22,10 +25,20 @@ add_executable(listenwords main.cpp
     process.h
     process.cpp
     proof.h
-    proof.cpp)
+    proof.cpp
+    compression.h
+    compression.cpp
+    routemanager.h
+    routemanager.cpp
+    address.h
+    address.cpp
+)
+
+target_include_directories(slowpost PRIVATE ${ZSTD_INCLUDE_DIRS})
+target_link_libraries(slowpost ${ZSTD_LIBRARIES})
 
 include(GNUInstallDirs)
-install(TARGETS listenwords
+install(TARGETS slowpost
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )

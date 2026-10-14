@@ -8,18 +8,25 @@
 
 class Proof {
 public:
-    // Создать и отправить пруф для одного чанка (первый чанок передачи)
-    //static bool sendSingleProof(uint16_t senderMac, uint32_t uuid, int part);
 
-    // Создать и отправить общий пруф для нескольких чанков
-    //static bool sendBatchProof(uint16_t senderMac, uint32_t uuid, const std::vector<int>& parts);
 
-    //bool parseProof(const std::vector<uint8_t>& data, PwProof& proof) const;
+    ///////////////////////////////////////////
+    /// перенести в File
+
+    static bool getTransferDir(uint32_t uuid, fs::path& transferDir);
+    static void cleanSpool(uint32_t uuid);
+    static void cleanInbox(uint32_t uuid);
+    static void moveToSent(uint32_t uuid);
+
+    /// Оставить тут
+    static void getOriginalFName(uint32_t uuid, std::string& original);
+    static void approveChunks(uint32_t uuid, std::vector<uint8_t> approvedChunks);
+    static bool isTransmissionCompleted(uint32_t uuid);
+    /////////////////////////////////////////////
 
     static bool sendFileProof(std::string senderIp, uint32_t uuid, std::vector<int>& parts);
-    //static bool sendFileProof(uint32_t uuid, std::vector<int>& parts);
 
-    // НОВОЕ: обработка входящего пруфа (файл "PF")
+
     // Переносит подтверждённые чанки из waiting/ в approved/
     static bool processIncomingProof(uint32_t uuid, const std::vector<uint8_t>& approvedParts);
 

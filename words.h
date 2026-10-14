@@ -70,6 +70,8 @@ public:
     //bool parseProof(const std::vector<uint8_t>& data, PwProof& proof) const;
     bool parseCommand(const std::vector<uint8_t>& data, PwCommand& cmd) const;
 
+    void addPWmagic(std::vector<uint8_t>& frame) const;
+
     // Утилита: hex-строка -> байты
     static std::vector<uint8_t> hexToBytes(const std::string& hex);
 
@@ -82,13 +84,8 @@ public:
         uint8_t part,
         const std::vector<uint8_t>& content);
 
+    static std::vector<uint8_t> buildEnvelope(std::vector<uint16_t> route);
 
-    static std::vector<uint8_t> buildFileFrame(
-        uint16_t finalDest,
-        uint16_t origin,
-        const std::string& name,
-        uint32_t uuid,
-        uint8_t totalParts,
-        uint8_t part,
-        const std::vector<uint8_t>& content);
+
+
 };

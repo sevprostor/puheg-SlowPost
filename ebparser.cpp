@@ -2,11 +2,15 @@
 #include "config.h"
 //#include "transport.h"
 #include "log.h"      // <-- единый вывод
-#include "../libs/json.hpp"
+#include "libs/json.hpp"
 #include "words.h"
 #include "file.h"
 #include "process.h"
+#include "routemanager.h"
+#include "address.h"
 #include <string>
+#include <fstream>
+#include <random>
 
 using json = nlohmann::json;
 
@@ -25,7 +29,7 @@ void EBParser::parseEmsg(const EBMessage& msg, File& file) {
     if (j.contains("netprofile")) netprofileTopic(msg, file);
     if (j.contains("words")) wordsTopic(msg, file);
     if (j.contains("process")) processTopic(msg, file);
-    if (j.contains("rx") || j.contains("tx")) rxtxTopic(msg);
+    //if (j.contains("rx") || j.contains("tx")) rxtxTopic(msg);
     if (j.contains("transport")) transportTopic(msg, file);
 
 }
@@ -102,25 +106,12 @@ void EBParser::transportTopic(const EBMessage& msg, File& file) {
     }
 
     //id = 0;
-    // Вычисление реальной скорости
-    uint32_t realBPS = 0;
-    if (currentPart > 0) {
-        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::steady_clock::now() - lastStart).count();
 
-        if (elapsedMs > 0) {
-            // Переданные байты = чанков * размер чанка
-            uint64_t bytesSent = static_cast<uint64_t>(currentPart) * (config.chunkSize / totalParts);
-
-            // Байт в секунду: bytesSent * 1000 / ms
-            realBPS = static_cast<uint32_t>((bytesSent * 1000) / elapsedMs);
-        }
-    }
 
     // Логируем информацию
-    Log::info("EBParser", "📡 Transport: ", direction, " [", pair, ":", peerIp, "] ",
+    Log::info("EBParser", direction, " ", pair, ":", peerIp, " ",
               currentPart + 1, "/", totalParts, " (", percent, "%) ",
-              "speed=", speed, " abs, Bps=", realBPS, "B/s");
+              "spd ", speed);
 
 }
 
@@ -239,11 +230,17 @@ void EBParser::netprofileTopic(const EBMessage& msg, File& file) {
     }
 
     Log::info("EBParser", "✅ Адресная книга загружена: ", config.addressbook.size(), " контактов");
+
+    //Проверка, есть ли Routes и его создание с первыми записями, если нет
+    RouteManager router;
+    router.initRoutesFile();
+
 }
 
 void EBParser::wordsTopic(const EBMessage& msg, File& file){
 
     Words words;
+    RouteManager router;
 
     //std::string topic = msg.rawtext;
     json j = json::parse(msg.rawtext, nullptr, false);
@@ -293,8 +290,16 @@ void EBParser::wordsTopic(const EBMessage& msg, File& file){
     if(env.nexthop == 0){
         Log::info("EBParser", "Я адресат, разбираю содержимое...");
 
+        /////////////////////////////////////////////////////////
+        /// Именно здесь нужно сохранить маршрут в /tmp/route,
+        /// если файла еще нет.
+        /////////////////////////////////////////////////////////
+
         switch (env.type) {
         case 'F': {
+
+
+
             PwFile pwFile;
 
             //туда передать body и размер envelope (откуда начинается сам файл)
@@ -305,12 +310,14 @@ void EBParser::wordsTopic(const EBMessage& msg, File& file){
                           " origin=", std::to_string(pwFile.origin),
                           " content=", pwFile.content.size(), " байт");
 
-                // 1. Просмотреть inbox/<sender>/uuid - переделать на IP-адрес!
+                // Сохранить маршрут из входящего пакета
+                router.saveIncomingRoute(pwFile.origin, env.route, pwFile.uuid);
 
                 // Сборка файла
                 if (file.assembleFile(pwFile)) {
                     Log::info("EBParser", "✅ Файл полностью получен!");
                 }
+
             }
             break;
         }
@@ -328,7 +335,105 @@ void EBParser::wordsTopic(const EBMessage& msg, File& file){
         }
 
     } else {
+
         Log::info("EBParser", "Я не адресат, нужно переложить это в отправку!");
+        // нужно сохранить это в spool c именем <part>-<total>-<retries>-<nextHopIp>-<uuid>.pwp
+        // от body отрезать envSize и сделать новый pwp со своим конвертом
+
+        // Потом здесь проверить наличие прямой связи с некстХопом.
+        // Если ее нет, то посмотреть свои маршруты...
+
+        // IP следующего хопа для имени файла
+        std::string nextHopIp = Address::macToIp(env.nexthop);
+
+        // Тело пакета без старого конверта
+        std::vector<uint8_t> payload(body.begin() + envSize, body.end());
+
+        // Новый конверт с тем же маршрутом
+        std::vector<uint8_t> newEnv = Words::buildEnvelope(env.route);
+
+        // Склеиваем: новый конверт + тело
+        std::vector<uint8_t> packet;
+        packet.reserve(newEnv.size() + payload.size());
+        packet.insert(packet.end(), newEnv.begin(), newEnv.end());
+        packet.insert(packet.end(), payload.begin(), payload.end());
+
+        // Сохраняем в spool с именем, содержащим nextHop
+        fs::path spoolDir = fs::path(config.workDir) /
+                            (config.myContact.ip.empty() ? "unknown" : config.myContact.ip) /
+                            "outbox" / "spool";
+
+        /*
+        std::error_code ec;
+        fs::create_directories(spoolDir, ec);
+
+        // Генерируем случайный UUID
+        static std::random_device rd;
+        static std::mt19937 gen(rd());
+        std::uniform_int_distribution<uint32_t> dist;
+        uint32_t uuid = dist(gen);
+
+        // Имя: 1-1-0-<nextHopIp>-<uuid>.pwp
+        std::string pwpName = "1-1-0-" + nextHopIp + "-" + std::to_string(uuid) + ".pwp";
+
+        //fs::path pwpPath = spoolDir / pwpName;
+        fs::path forwardPath = spoolDir;
+
+        // если размер файла менее 100 байт, то сохранить в spoolDir
+        // иначе - в spoolDir / "forward"
+
+        forwardPath = forwardPath / "forward";
+        file.ensureDir(forwardPath);
+
+        fs::path pwpPath = forwardPath / pwpName;
+
+        std::ofstream out(pwpPath.string(), std::ios::binary | std::ios::trunc);
+        if (out) {
+            out.write(reinterpret_cast<const char*>(packet.data()),
+                      static_cast<std::streamsize>(packet.size()));
+            out.close();
+            Log::info("EBParser", "📦 Пакет для ретрансляции сохранён: ", pwpPath.string());
+        } else {
+            Log::error("EBParser", "❌ Не удалось сохранить пакет для ретрансляции");
+        }
+        */
+
+        std::error_code ec;
+
+        // Генерируем случайный UUID
+        static std::random_device rd;
+        static std::mt19937 gen(rd());
+        std::uniform_int_distribution<uint32_t> dist;
+        uint32_t uuid = dist(gen);
+
+        // Имя: 1-1-0-<nextHopIp>-<uuid>.pwp
+        std::string pwpName = "1-1-0-" + nextHopIp + "-" + std::to_string(uuid) + ".pwp";
+
+        // Выбираем путь в зависимости от размера пакета
+        fs::path targetDir;
+        if (packet.size() < 100) {
+            // Маленькие пакеты (например, proof) кладём прямо в spoolDir
+            targetDir = spoolDir;
+            fs::create_directories(spoolDir, ec);
+            Log::info("EBP", "📦 Малый пакет (", packet.size(), " байт) → spoolDir");
+        } else {
+            // Большие пакеты — в spoolDir/forward/
+            targetDir = spoolDir / "forward";
+            fs::create_directories(targetDir, ec);
+            Log::info("EBP", "📦 Большой пакет (", packet.size(), " байт) → forward/");
+        }
+
+        fs::path pwpPath = targetDir / pwpName;
+
+        std::ofstream out(pwpPath.string(), std::ios::binary | std::ios::trunc);
+        if (out) {
+            out.write(reinterpret_cast<const char*>(packet.data()),
+                      static_cast<std::streamsize>(packet.size()));
+            out.close();
+            Log::info("EBP", "📦 Пакет для ретрансляции сохранён: ", pwpPath.string());
+        } else {
+            Log::error("EBP", "❌ Не удалось сохранить пакет для ретрансляции");
+        }
     }
 
 }
