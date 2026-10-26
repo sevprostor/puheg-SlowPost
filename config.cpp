@@ -1,10 +1,33 @@
 #include "config.h"
+#include "log.h"
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <cctype>
-
+#include <chrono>
 //Config config;
+
+uint64_t Config::nowEpoch(){
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
+}
+
+//Отвешивает зависший флаг BUSY
+bool Config::unhangBusy(uint64_t nowTime){
+
+    if(nowTime - config.driverState.busySince > config.unhangBusyTimeout && config.driverState.busy){
+
+        config.driverState.busy = false;
+        Log::warn("Config", "Сброшено: config.driverState.busy = false");
+        return true;
+
+    }
+
+    return false;
+
+}
 
 bool Config::loadFromFile(const std::string& filename) {
     std::ifstream file(filename);

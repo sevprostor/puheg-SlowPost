@@ -3,11 +3,18 @@
 #include "file.h"
 #include "config.h"
 #include "log.h"
+#include "address.h"
+#include "routemanager.h"
+#include "libs/json.hpp"
+#include "stats.h"
+
 #include <filesystem>
 #include <fstream>
 #include <set>
 #include <algorithm>
 
+
+using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 bool Proof::getTransferDir(uint32_t uuid, fs::path& transferDir){
@@ -61,7 +68,8 @@ void Proof::approveChunks(uint32_t uuid, std::vector<uint8_t> approvedChunks){
 
     fs::path transferDir;
 
-    if(!getTransferDir(uuid, transferDir)) return;
+    //if(!getTransferDir(uuid, transferDir)) return;
+    if(!File::getSpoolPeerDir(uuid, transferDir)) return;
 
     fs::path waitingDir = transferDir / "waiting";
     fs::path approvedDir = transferDir / "approved";
@@ -195,7 +203,8 @@ void Proof::getOriginalFName(uint32_t uuid, std::string& original){
 
     fs::path transferDir;
 
-    if(!getTransferDir(uuid, transferDir)) return;
+    //if(!getTransferDir(uuid, transferDir)) return;
+    if(!File::getSpoolPeerDir(uuid, transferDir)) return;
 
     fs::path approvedDir = transferDir / "approved";
 
@@ -234,16 +243,19 @@ void Proof::getOriginalFName(uint32_t uuid, std::string& original){
     return;
 }
 
-bool Proof::processIncomingProof(uint32_t uuid, const std::vector<uint8_t>& approvedParts) {
+bool Proof::processIncomingProof(uint32_t uuid, const std::vector<uint8_t>& approvedParts){
+
+    // Здесь разбираются пришедшие пруфы и файлы чанков переносятся в approved.
+    // Здесь же происходит симметричная обработка файлов в inbox при отправке наших пруфов.
+    // Метод вызывается как при приходе пруфа извне, так и при успешной отправке пруфа вовне.
 
     File file;
     std::error_code ec;
+    std::string uuidStr = std::to_string(uuid);
 
-    fs::path transferDir;
-
+    fs::path transferDir;    
     if(!getTransferDir(uuid, transferDir)) return false;
 
-    std::string uuidStr = std::to_string(uuid);
     fs::path peerIpPath = transferDir.parent_path();
     std::string peerIp = peerIpPath.filename().string();
 
@@ -261,30 +273,18 @@ bool Proof::processIncomingProof(uint32_t uuid, const std::vector<uint8_t>& appr
 
     if(isTransmissionCompleted(uuid)){
 
+
+
         std::string originalFilename;
         getOriginalFName(uuid, originalFilename);
 
         if (originalFilename.empty()) {
+
             Log::warn("Proof", "⚠️ Не удалось определить имя оригинального файла");
+
         } else {
-            //Log::info("Proof", "📄 Оригинальный файл: ", originalFilename);
 
-            // Проверяем, не proof-ли это файл (proof-файлы не переносим в sent)
-            std::string ext = fs::path(originalFilename).extension().string();
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-            bool isProofFile = (ext == ".pwproof");
-
-            // === ШАГ 3: перенос в outbox/<peerIp>/sent/ ===
-            if (!isProofFile) {
-
-                moveToSent(uuid);
-
-            } else {
-
-                //Log::info("Proof", "📋 Это proof-файл, в sent не переносим");
-                cleanInbox(uuid);
-            }
+            moveToSent(uuid);
 
         }
 
@@ -295,55 +295,58 @@ bool Proof::processIncomingProof(uint32_t uuid, const std::vector<uint8_t>& appr
     return true;
 }
 
-void Proof::cleanInbox(uint32_t uuid){
 
-    // Удаляем входящую передачу в inbox/<peerIp>/<uuid>/
-    // если там не осталось ничего, кроме tmp/route
+
+void Proof::cleanInbox(uint32_t uuid) {
+
+    // Если в inbox/<peerIp>/<uuid>/ не осталось ничего, кроме tmp,
+    // - то удаляем входящую передачу в inbox/<peerIp>/<uuid>/
+    //   и сохраняем данные о ней в inbox/history/<uuid>
+    //
 
     // Извлекаем uuid из имени proof-файла
     // Возможные форматы:
     //   0-1-0-<uuid>.pwproof  (формат pwp)
     //   <uuid>.pwproof        (простой формат)
 
-    //std::string uuidStr;
-
     File file;
-    fs::path transferDir;
+    //fs::path transferDir;
 
-    if(!getTransferDir(uuid, transferDir)) return;
 
-    fs::path waitingDir = transferDir / "waiting";
-    fs::path approvedDir = transferDir / "approved";
+
     std::string uuidStr = std::to_string(uuid);
-    fs::path peerIpPath = transferDir.parent_path();
-    std::string peerIp = peerIpPath.filename().string();
+    std::string peerIp = file.getPeerIpByUuid(uuid);
 
     std::error_code ec;
-
-
-    // Имя оригинального файла — из имени любого чанка в approved/
-    std::string originalFilename;
-    getOriginalFName(uuid, originalFilename);
-
-    fs::path origPath = originalFilename;
-    std::string baseName = origPath.stem().string();  // без расширения
 
     fs::path uuidDir = fs::path(config.workDir) /
                        (config.myContact.ip.empty() ? "unknown" : config.myContact.ip) /
                        "inbox" / peerIp / uuidStr;
 
     if (fs::exists(uuidDir, ec)) {
+
         // Проверяем, что в каталоге нет ничего, кроме tmp/
-        bool onlyTmp = true;
+        // это означает что передача только что закончилась и пруф успешно отправлен
+
+
         fs::path tmpDir = uuidDir / "tmp";
 
-        for (const auto& entry : fs::directory_iterator(uuidDir, ec)) {
-            if (entry.path() == tmpDir) continue;
-            onlyTmp = false;
-            break;
-        }
+        //for (const auto& entry : fs::directory_iterator(uuidDir, ec)) {
+        //    if (entry.path() == tmpDir) continue;
+        //    onlyTmp = false;
+        //    break;
+        //}
 
-        if (onlyTmp) {
+        //if (onlyTmp) {
+        if (file.isInboxJustFinished(uuid)) {
+
+            //Statistics::finalizeIncomingStats(uuid, peerIp);
+            Statistics::finalizeStats(uuid, peerIp, false);
+
+            // ============================================================
+            // УДАЛЕНИЕ КАТАЛОГА
+            // ============================================================
+
             fs::remove_all(uuidDir, ec);
             if (ec) {
                 Log::warn("Proof", "⚠️ Не удалось удалить каталог uuid: ",
@@ -360,24 +363,13 @@ void Proof::cleanInbox(uint32_t uuid){
         Log::warn("Proof", "⚠️ Каталог входящей передачи не найден: ",
                   uuidDir.string());
     }
-    //}
 
-    // Удаляем proof-файл из work/
-    fs::path workPath = file.getOutboxDir(peerIp) / "work" / originalFilename;
-    if (fs::exists(workPath, ec)) {
-        fs::remove(workPath, ec);
-        if (!ec) {
-            Log::info("Proof", "✓ Proof-файл удалён из work/: ", workPath.string());
-        } else {
-            Log::warn("Proof", "⚠️ Не удалось удалить proof-файл: ", ec.message());
-        }
-    } else {
-        Log::warn("Proof", "⚠️ Proof-файл не найден в work/: ", workPath.string());
-    }
 
 }
 
+
 void Proof::cleanSpool(uint32_t uuid){
+
 
     // === ШАГ 0: Удаляем оставшиеся .pwp файлы (ретраи) для этого uuid из корня spool/<peerIp>/ ===
     std::string uuidStr = std::to_string(uuid);
@@ -387,11 +379,21 @@ void Proof::cleanSpool(uint32_t uuid){
 
     fs::path transferDir;
 
-    if(!getTransferDir(uuid, transferDir)) return;
+    //if(!getTransferDir(uuid, transferDir)) return;
+    if(!File::getSpoolPeerDir(uuid, transferDir)) return;
 
     //std::string uuidStr = std::to_string(uuid);
     fs::path peerIpPath = transferDir.parent_path();
     std::string peerIp = peerIpPath.filename().string();
+
+
+
+
+    //Здесь финализируем stats
+    Statistics::finalizeStats(uuid, peerIp, true);
+
+
+
 
     if (fs::exists(peerIpPath, ec) && fs::is_directory(peerIpPath, ec)) {
         for (const auto& entry : fs::directory_iterator(peerIpPath, ec)) {
@@ -447,7 +449,8 @@ void Proof::moveToSent(uint32_t uuid){
     File file;
     fs::path transferDir;
 
-    if(!getTransferDir(uuid, transferDir)) return;
+    //if(!getTransferDir(uuid, transferDir)) return;
+    if(!File::getSpoolPeerDir(uuid, transferDir)) return;
 
     fs::path peerIpPath = transferDir.parent_path();
     std::string peerIp = peerIpPath.filename().string();
@@ -481,55 +484,55 @@ void Proof::moveToSent(uint32_t uuid){
 
 }
 
-//bool Proof::sendFileProof(uint16_t senderMac, uint32_t uuid, std::vector<int>& parts) {
-bool Proof::sendFileProof(std::string senderIp, uint32_t uuid, std::vector<int>& parts) {
+bool Proof::sendFileProof(std::string senderIp, uint32_t uuid, std::vector<int>& parts, bool final) {
 
     if(senderIp == "unknown") return false;
 
-    Log::info("Proof", "📤 Отправка пруфа для uuid=", uuid);
+    if(final) Log::info("Proof", "Сборка финального 'P' пруфа для uuid ", uuid);
+    else Log::info("Proof", "Сборка текущего 'p' пруфа для uuid ", uuid);
 
-    // Находим IP отправителя
-
-    //Надо посмотреть во входящих - найти каталог, содержащий uuid
-
-    // Путь к каталогу outbox/<senderIp>/
-    fs::path outboxDir = fs::path(config.workDir) /
-                         (config.myContact.ip.empty() ? "unknown" : config.myContact.ip) /
-                         "outbox" / senderIp;
-
-    // Создаём каталог если не существует
-    std::error_code ec;
-    if (!fs::exists(outboxDir, ec)) {
-        fs::create_directories(outboxDir, ec);
-        if (ec) {
-            Log::error("Proof", "❌ Не удалось создать каталог outbox/", senderIp);
-            return false;
-        }
-    }
-
-    // Путь к файлу пруфа: outbox/<senderIp>/<uuid>.pwProof
-    fs::path proofPath = outboxDir / (std::to_string(uuid) + ".pwproof");
-
-    // Содержимое: один байт с номером части
+    // Формируем содержимое пруфа
     std::vector<uint8_t> content;
-    std::string partsForLog;
-
     for(int i = 0; i < parts.size(); i++){
         content.push_back(static_cast<uint8_t>(parts[i]));
-        partsForLog += std::to_string(static_cast<uint8_t>(parts[i])) + ",";
     }
 
-    // Записываем файл
-    std::ofstream out(proofPath.string(), std::ios::binary | std::ios::trunc);
-    if (!out) {
-        Log::error("Proof", "❌ Не удалось создать файл пруфа: ", proofPath.string());
+    // Получаем маршрут для ответа из входящей передачи
+    RouteManager router;
+    std::vector<uint16_t> route = router.getRouteForReply(uuid);
+
+    if (route.empty()) {
+        Log::error("Proof", "❌ Маршрут для ответа не найден");
         return false;
     }
-    out.write(reinterpret_cast<const char*>(content.data()), content.size());
+
+    // Строим 'P' пакет с uuid в конверте И в нагрузке
+    std::vector<uint8_t> packet = Words::buildProofFrame(route, uuid, content, final);
+
+    // Определяем IP следующего хопа
+    uint16_t nextHopMac = route.front();
+    std::string nextHopIp = Address::macToIp(nextHopMac);
+
+    // Сохраняем сразу в spool как готовый .pwp
+    fs::path spoolDir = fs::path(config.workDir) /
+                        (config.myContact.ip.empty() ? "unknown" : config.myContact.ip) /
+                        "outbox" / "spool";
+
+    std::error_code ec;
+    fs::create_directories(spoolDir, ec);
+
+    // Имя: proof-<nextHopIp>-<uuid>.pwp
+    std::string pwpName = "0-1-0-" + nextHopIp + "-" + std::to_string(uuid) + ".pwp";
+    fs::path pwpPath = spoolDir / pwpName;
+
+    std::ofstream out(pwpPath.string(), std::ios::binary | std::ios::trunc);
+    if (!out) {
+        Log::error("Proof", "❌ Не удалось создать файл пруфа");
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(packet.data()), packet.size());
     out.close();
 
-    Log::info("Proof", "✓ Файл пруфа создан: ", proofPath.string(),
-              " (uuid=", uuid, ", parts=", partsForLog, ")");
+    Log::debug("Proof", "Пруф создан: ", pwpPath.string());
     return true;
 }
-

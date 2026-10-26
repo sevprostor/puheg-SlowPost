@@ -32,6 +32,7 @@ public:
     static void netprofileTopic(const EBMessage&, File&);
     static void rxtxTopic(const EBMessage&);
     static void transportTopic(const EBMessage&, File&);
+    static bool hasPwpWithUuid(const fs::path&, uint32_t);
 
 
 private:

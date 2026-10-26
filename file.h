@@ -78,10 +78,12 @@ public:
         uint32_t uuid;
         uint64_t timeCreated;
     };
+
     std::vector<PwpFile> getPwpFiles();
 
     // НОВОЕ: удалить .pwp файл
     void removePwp(const fs::path& path);
+    int removePwpWithUuid(const fs::path& dir, uint32_t targetUuid);
 
     // НОВОЕ: переименовать .pwp, увеличив счётчик ретраев
     void incrementPwpRetry(const fs::path& path);
@@ -100,18 +102,22 @@ public:
 
     bool moveForwardToSpool();
 
-private:
+    bool isInboxJustFinished(uint32_t uuid);
 
     static uint64_t fileTimeToEpoch(const fs::path& p);
-
-
 
     // <workDir>/<myIp>/outbox/spool/<destIp>-<uuid>/
     fs::path getSpoolDir(const std::string& destIp, uint32_t uuid) const;
 
+    static bool getSpoolPeerDir(uint32_t uuid, fs::path& transferDir);
+
+private:
+
+
+
 
     // Путь к каталогу чанков: <workDir>/<myIp>/outbox/<contactIp>/outgoing/<uuid>/
-    fs::path getOutgoingDir(const std::string& contactIp, uint32_t uuid) const;
+    //fs::path getOutgoingDir(const std::string& contactIp, uint32_t uuid) const;
 
     // Путь к директории входящих файлов: <workDir>/<myIp>/inbox/<senderIp>/
     //fs::path getInboxDir(uint16_t senderId) const;

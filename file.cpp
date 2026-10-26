@@ -2,11 +2,13 @@
 #include "config.h"
 #include "log.h"
 #include "process.h"
+#include "stats.h"
 #include "proof.h"
 #include "compression.h"
 #include "words.h"
 #include "routemanager.h"
 #include "address.h"
+//#include "stats.h"
 #include <fstream>
 #include <algorithm>
 #include <random>
@@ -194,7 +196,8 @@ void File::proofAvailableChunks() {
                 allPartsVec.insert(allPartsVec.end(), waitingParts.begin(), waitingParts.end());
 
                 // Отправляем batch-пруф
-                if (Proof::sendFileProof(peerIp, uuid, allPartsVec)) {
+                // Пруф "промежуточного" типа 'p'
+                if (Proof::sendFileProof(peerIp, uuid, allPartsVec, false)) {
                     // === НОВОЕ: обновляем время только самого нового файла ===
                     if (!newestFile.empty()) {
                         auto now = fs::file_time_type::clock::now();
@@ -240,8 +243,17 @@ bool File::assembleFile(const PwFile& pwFile) {
     //      - если в inbox/<senderIp>/<uuid> один или более файлов, а со времени создания последнего файла
     //      в inbox/<senderIp>/<uuid>/waiting прошло больше 5 минут, то отправить пруф
 
+    /////////////////////////////////////////
+    /// Здесь же на каждом чанке будем сохранять статистику в tmp/
+    ///
 
     uint32_t uuid = pwFile.uuid;
+
+    // Кейсы дедубликации чанков
+    // 1. Передача только что закончилась, пруф ушел в спул, еще не отправился,
+    // в инбоксе пока висит финишированная передача:
+
+
     int part = pwFile.part;
     int totalParts = pwFile.totalParts;
 
@@ -303,6 +315,8 @@ bool File::assembleFile(const PwFile& pwFile) {
         return false;
     }
 
+
+
     // Сохраняем чанок в waiting/: <part>-<totalParts>-<filename>
     std::string chunkName = std::to_string(part) + "-" + std::to_string(totalParts) + "-" + pwFile.name;
     fs::path chunkPath = waitingDir / chunkName;
@@ -358,30 +372,17 @@ bool File::assembleFile(const PwFile& pwFile) {
     // Если в waiting/ один файл (только что пришедший) и в parent/ пусто
     if (waitingCount == 1 && parentCount == 0) {
 
-
-
-
         Log::info("File", "🎯 Первый чанок передачи uuid=", uuid);
 
         // Отправляем пруф для этого чанка
 
-
-        // Proof - это точно такой же F-пакет. В нем указано uuid идущей передачи,
-        // а в имени файла - "PF". Содержимое файла - байты с номерами полученных частей.
-
-
-        // Нужно сохранить файл "<uuid>.pwProof" в /outbox/peer_ip/, и как только он оттуда исчезнет -
-        // переместить чанку в inbox/<uuid>/
-
-
         std::vector<int> parts;
         parts.emplace_back(part);
 
+        // Пруф "промежуточного" типа 'p'
+        if (Proof::sendFileProof(senderIp, uuid, parts, false)) {
 
-
-        if (Proof::sendFileProof(senderIp, uuid, parts)) {
             // Успешно — перемещаем чанок из waiting/ в parent/
-
             fs::rename(chunkPath, uuidDir / chunkName, ec);
             if (ec) {
                 Log::warn("File", "⚠️ Не удалось переместить чанок из waiting/");
@@ -435,11 +436,15 @@ bool File::assembleFile(const PwFile& pwFile) {
 
 
         if (allPresent) {
+
             Log::info("File", "✅ Все ", totalParts, " чанков получены для uuid=", uuid);
+
 
             // Отправляем batch-пруф
             std::vector<int> allPartsVec(allParts.begin(), allParts.end());
-            Proof::sendFileProof(senderIp, uuid, allPartsVec);
+
+            // Посылка пруфа "окончательного" типа 'P'
+            Proof::sendFileProof(senderIp, uuid, allPartsVec, true);
 
             // Перемещаем все чанки из waiting/ в parent/
             for (const auto& entry : fs::directory_iterator(waitingDir, ec)) {
@@ -550,8 +555,14 @@ bool File::assembleFile(const PwFile& pwFile) {
                       finalPath.string(), " (",
                       fs::file_size(finalPath, ec), " байт)");
 
+
+
+            //
             // Проверяем наличие tmp/route — если есть, значит возможно нужно будет отправить пруф
             // и метаданные еще потребуются. Каталог uuid будет удалён позже.
+            //
+
+
 
             fs::path tmpRoute = uuidDir / "tmp" / "route";
 
@@ -585,15 +596,20 @@ bool File::assembleFile(const PwFile& pwFile) {
                     }
                 }
 
+                // На следующем такте, если вдруг вдогонку опять придет что-то из этой передачи,
+                // то чанок нужно будет отбросить по факту существования uuid/ в котором нет
+                // ничего, кроме tmp. (Эта же механика используется и при удалении каталога uuid.
+                // Видимо, ЕГО НЕ СТОИТ УДАЛЯТЬ ВООБЩЕ для дедубликации передач.
+
                 Log::info("File", "⏳ Каталог uuid сохранён для отправки пруфа: ",
                           uuidDir.string());
 
             }
 
-
+            return true;
         }
 
-        return true;
+        //return true;
     }
 
     return false;
@@ -616,11 +632,34 @@ bool File::isComplete(uint32_t uuid) const {
     return true;
 }
 
-std::string File::getCompletePath(uint32_t uuid) const {
+bool File::isInboxJustFinished(uint32_t uuid){
+
+    bool onlyTmp = true;
+
+    std::string peerIp = getPeerIpByUuid(uuid);
+    std::string uuidStr = std::to_string(uuid);
+    fs::path uuidDir = fs::path(config.workDir) / config.myContact.ip / "inbox" / peerIp / uuidStr;
+    fs::path tmpDir = uuidDir / "tmp";
+
+    std::error_code ec;
+
+    for (const auto& entry : fs::directory_iterator(uuidDir, ec)) {
+        if (entry.path() == tmpDir) continue;
+        onlyTmp = false;
+        break;
+    }
+
+    // Если такой директории нет и попытка поиска вызвала ошибку
+    if(ec) onlyTmp = false;
+
+    return onlyTmp;
+}
+
+//std::string File::getCompletePath(uint32_t uuid) const {
     // Этот метод используется после assembleFile, когда файл уже сохранён
     // Возвращает пустую строку, если файл не найден
-    return "";
-}
+    //return "";
+//}
 
 
 std::string File::getPeerIpByUuid(uint32_t uuid) const {
@@ -633,7 +672,7 @@ std::string File::getPeerIpByUuid(uint32_t uuid) const {
     inboxBase /= "inbox";
 
     if (!fs::exists(inboxBase, ec)) {
-        Log::error("File", "❌ Каталог inbox/ не найден");
+        Log::warn("File", "Каталог inbox/ не найден");
         return "unknown";
     }
 
@@ -646,7 +685,7 @@ std::string File::getPeerIpByUuid(uint32_t uuid) const {
         // Проверяем, существует ли каталог с этим uuid
         fs::path uuidDir = ipEntry.path() / uuidStr;
         if (fs::exists(uuidDir, ec) && fs::is_directory(uuidDir, ec)) {
-            Log::info("File", "✓ Найден IP для uuid=", uuid, ": ", peerIp);
+            Log::info("File", "Peer IP для uuid=", uuid, ": ", peerIp);
             return peerIp;
         }
     }
@@ -656,10 +695,10 @@ std::string File::getPeerIpByUuid(uint32_t uuid) const {
 }
 
 //////////////////////////////////////////////////////////////////////////////////
-fs::path File::getOutgoingDir(const std::string& contactIp, uint32_t uuid) const {
+//fs::path File::getOutgoingDir(const std::string& contactIp, uint32_t uuid) const {
     // <workDir>/<myIp>/outbox/<contactIp>/outgoing/<uuid>/
-    return getOutboxDir(contactIp) / "outgoing" / std::to_string(uuid);
-}
+//    return getOutboxDir(contactIp) / "outgoing" / std::to_string(uuid);
+//}
 //////////////////////////////////////////////////////////////////////////////////
 
 // ============================================================
@@ -828,12 +867,34 @@ uint32_t File::spoolFile(const OutboxFile& of, int chunkSize) {
     }
     in.close();
 
+    // === ПРОВЕРКА: размер файла не превышает chunkSize * MAX_CHUNKS ===
+    fs::path errDir = getOutboxDir(of.destIp) / "error";
+    if (!ensureDir(errDir)) {
+        Log::error("File", "❌ Не удалось создать каталог error/");
+        return 0;
+    }
+
+    int totalParts = static_cast<int>((fileSize + chunkSize - 1) / chunkSize);
+    if (totalParts == 0) totalParts = 1;
+
+    if (totalParts > MAX_CHUNKS) {
+        Log::error("File", "Файл ", workPath.string(), " слишком большой: ",
+                   fileSize, "B / ", totalParts, " чанков (макс. ", chunkSize * MAX_CHUNKS, "B / ", MAX_CHUNKS, ")");
+
+        // Откат: удаляем файл из work/
+        //fs::remove(workPath, ec);
+        // Перенос в /error
+        fs::rename(workPath, errDir / workPath.filename(), ec);
+
+        return 0;
+    }
+
     // === ШАГ 3: Нарезка чанков ===
     fs::path spoolDir = getSpoolDir(of.destIp, uuid);
     if (!ensureDir(spoolDir)) return 0;
 
-    int totalParts = static_cast<int>((fileSize + chunkSize - 1) / chunkSize);
-    if (totalParts == 0) totalParts = 1;
+    //int totalParts = static_cast<int>((fileSize + chunkSize - 1) / chunkSize);
+    //if (totalParts == 0) totalParts = 1;
 
     Log::info("File", "📦 Нарезка ", of.filename, " (", fileSize, " байт) на ",
               totalParts, " чанков -> ", spoolDir.string());
@@ -860,8 +921,8 @@ uint32_t File::spoolFile(const OutboxFile& of, int chunkSize) {
     Log::info("File", "✅ Файл ", of.filename, " в spool (uuid=", uuid, ")");
 
     //////////////////////////////////////////////////////////////
-    // Здесь первое внедрение маршрута
-    // проверить существование маршрута и сохранить его туда
+    /// Здесь первое внедрение маршрута
+    /// проверить существование маршрута и сохранить его туда
 
     RouteManager router;
     uint16_t destMac = Address::ipToMac(of.destIp);
@@ -872,8 +933,16 @@ uint32_t File::spoolFile(const OutboxFile& of, int chunkSize) {
     //std::string ext = best->path.extension().string();
     if(isProofFile){
         router.saveRouteForProof(destMac, uuid);
-    } else
+    } else {
         router.saveRouteForTransfer(destMac, uuid);
+
+        /////////////////////////////////////////////////////////////////////
+        /// Статистика исходящей передачи начинается здесь
+        ///
+
+        Statistics::createOutgoingStats(uuid, of.destIp, of.filename);
+
+    }
 
     return uuid;
 }
@@ -1147,19 +1216,19 @@ void File::prepareWaitingPackets(int maxPwp) {
             RouteManager router;
             std::vector<uint16_t> route;
 
-            if(ext == ".pwproof"){
+            //if(ext == ".pwproof"){
 
                 // Пруфу присваивается особое имя и маршрут для ответа
                 // из входящей передачи
 
 
                 //Log::info("File", "Опакечивание пруфа");
-                fileName = "PF";
+                //fileName = "PF";
 
                 // ЭТО ДОЛЖНО ПРОИСХОДИТЬ В spoolFile()
                 //route = router.getRouteForReply(uuid);
 
-            } //else
+            //} //else
                 route = router.getRouteForTransfer(destMac, uuid);
 
             if(route.empty()){
@@ -1264,6 +1333,54 @@ void File::removePwp(const fs::path& path) {
     }
 }
 
+int File::removePwpWithUuid(const fs::path& dir, uint32_t targetUuid) {
+
+    std::error_code ec;
+    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) return 0;
+
+    Words words;
+    int removedCount = 0;
+
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (!entry.is_regular_file()) continue;
+        if (entry.path().extension() != ".pwp") continue;
+
+        fs::path filePath = entry.path();
+
+        // Читаем содержимое .pwp файла
+        std::ifstream pwpFile(filePath.string(), std::ios::binary);
+        if (!pwpFile) continue;
+
+        std::vector<uint8_t> pwpContent((std::istreambuf_iterator<char>(pwpFile)),
+                                        std::istreambuf_iterator<char>());
+        pwpFile.close();
+
+        // Проверяем магик PW\x01
+        if (pwpContent.size() < 3) continue;
+        if (pwpContent[0] != 'P' || pwpContent[1] != 'W' || pwpContent[2] != 0x01) continue;
+
+        // Пропускаем магик (3 байта)
+        std::vector<uint8_t> body(pwpContent.begin() + 3, pwpContent.end());
+
+        // Парсим envelope
+        Envelope env;
+        size_t envSize = words.parseEnv(body, env);
+
+        // Удаляем только чанки 'F' с нужным uuid (не трогаем другие пруфы)
+        if (envSize > 0 && env.uuid == targetUuid && env.type == 'F') {
+            fs::remove(filePath, ec);
+            if (!ec) {
+                Log::info("EBP", "   🗑️ Удалён чанк: ", filePath.filename().string());
+                removedCount++;
+            } else {
+                Log::warn("EBP", "   ⚠️ Не удалось удалить: ", filePath.filename().string());
+            }
+        }
+    }
+
+    return removedCount;
+}
+
 void File::incrementPwpRetry(const fs::path& path) {
     std::string name = path.filename().string();
     size_t d1 = name.find('-');
@@ -1281,12 +1398,12 @@ void File::incrementPwpRetry(const fs::path& path) {
         std::error_code ec;
         fs::rename(path, newPath, ec);
         if (ec) {
-            Log::warn("File", "⚠️ Не удалось переименовать .pwp");
+            Log::error("File", "⚠️ Не удалось переименовать .pwp");
         } else {
-            Log::info("File", "🔄 .pwp переименован (retry ", retries, "): ", newPath.string());
+            Log::debug("File", "🔄 .pwp переименован (retry ", retries, "): ", newPath.string());
         }
     } catch (...) {
-        Log::warn("File", "⚠️ Ошибка парсинга имени .pwp");
+        Log::error("File", "⚠️ Ошибка парсинга имени .pwp");
     }
 }
 
@@ -1333,7 +1450,52 @@ bool File::moveForwardToSpool() {
         return false;
     }
 
-    Log::info("File", "📦 Forward-пакет перемещён в spool: ",
+    Log::info("File", "Forward-пакет перемещён в spool: ",
               oldest.filename().string());
     return true;
+}
+
+bool File::getSpoolPeerDir(uint32_t uuid, fs::path& transferDir){
+
+    File file;
+    //fs::path transferDir;
+
+    fs::path spoolBase = file.getSpoolBase();
+    std::error_code ec;
+
+    if (!fs::exists(spoolBase, ec)) {
+        Log::error("Proof", "❌ Каталог spool/ не найден");
+        return false;
+    }
+
+    std::string uuidStr = std::to_string(uuid);
+
+    bool found = false;
+
+    // Обходим все каталоги: spool/<peerIp>/<uuid>/
+    for (const auto& ipEntry : fs::directory_iterator(spoolBase, ec)) {
+        if (!ipEntry.is_directory()) continue;
+
+        for (const auto& uuidEntry : fs::directory_iterator(ipEntry.path(), ec)) {
+            if (!uuidEntry.is_directory()) continue;
+
+            if (uuidEntry.path().filename().string() == uuidStr) {
+                transferDir = uuidEntry.path();
+                found = true;
+                //Log::info("Proof", "✓ Найдена передача uuid=", uuid,
+                //          " в ", transferDir.string());
+                break;
+            }
+        }
+
+        if (found) break;
+    }
+
+    if (!found) {
+        Log::error("Proof", "❌ Передача uuid=", uuid, " не найдена в spool/");
+        return false;
+    }
+
+    return true;
+
 }

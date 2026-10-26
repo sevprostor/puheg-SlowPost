@@ -12,6 +12,7 @@ std::vector<uint8_t> Words::hexToBytes(const std::string& hex) {
     return bytes;
 }
 
+/*
 size_t Words::parseEnv(const std::vector<uint8_t>& data, Envelope& env) const {
 
     // Парсит конверт пакета и возвращает длину конверта
@@ -60,9 +61,53 @@ size_t Words::parseEnv(const std::vector<uint8_t>& data, Envelope& env) const {
 
     return 1 + 1 + (routeSize * 2); // type(1), rsz(1), route(N * 2)
 }
+*/
 
+size_t Words::parseEnv(const std::vector<uint8_t>& data, Envelope& env) const {
+    if (data.size() < 2) {
+        Log::warn("Words", "Слишком короткий пакет");
+        return 0;
+    }
 
+    env.type = static_cast<char>(data[0]);
+    uint8_t routeSize = data[1];
 
+    size_t requiredSize = 2 + static_cast<size_t>(routeSize) * 2 + 4; // +4 для uuid
+    if (data.size() < requiredSize) {
+        Log::warn("Words", "Не хватает данных");
+        return 0;
+    }
+
+    env.route.clear();
+    env.route.reserve(routeSize);
+
+    size_t pos = 2;
+    bool thisisnexthop = false;
+
+    for (uint8_t i = 0; i < routeSize; ++i) {
+        uint16_t addr = static_cast<uint16_t>((data[pos] << 8) | data[pos + 1]);
+        env.route.push_back(addr);
+
+        if(thisisnexthop){
+            env.nexthop = addr;
+            thisisnexthop = false;
+        }
+
+        if(addr == config.myContact.mac) thisisnexthop = true;
+        pos += 2;
+    }
+
+    // ← ДОБАВИТЬ: читаем uuid из конверта
+    env.uuid = static_cast<uint32_t>(
+        (data[pos] << 24) | (data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3]);
+    pos += 4;
+
+    env.fdest = env.route.back();
+
+    return 1 + 1 + (routeSize * 2) + 4; // тип + routeSize + route + uuid
+}
+
+/*
 bool Words::parseFile(const std::vector<uint8_t>& data, size_t pos, PwFile& file) const {
 
 
@@ -105,7 +150,38 @@ bool Words::parseFile(const std::vector<uint8_t>& data, size_t pos, PwFile& file
     file.content.assign(data.begin() + pos, data.end());
     return true;
 }
+*/
 
+bool Words::parseFile(const std::vector<uint8_t>& data, size_t pos, PwFile& file) const {
+    // origin (2 байта)
+    if (pos + 2 > data.size()) return false;
+    file.origin = static_cast<uint16_t>((data[pos] << 8) | data[pos + 1]);
+    pos += 2;
+
+    // nameSize + name
+    if (pos + 1 > data.size()) return false;
+    uint8_t nameSize = data[pos++];
+
+    if (pos + nameSize > data.size()) return false;
+    file.name.assign(reinterpret_cast<const char*>(&data[pos]), nameSize);
+    pos += nameSize;
+
+    // ← ОСТАВИТЬ: читаем uuid из нагрузки (надёжный)
+    if (pos + 4 > data.size()) return false;
+    file.uuid = static_cast<uint32_t>(
+        (data[pos] << 24) | (data[pos + 1] << 16) |
+        (data[pos + 2] << 8) | data[pos + 3]);
+    pos += 4;
+
+    // totalParts + part
+    if (pos + 2 > data.size()) return false;
+    file.totalParts = data[pos++];
+    file.part       = data[pos++];
+
+    // content
+    file.content.assign(data.begin() + pos, data.end());
+    return true;
+}
 
 
 bool Words::parseCommand(const std::vector<uint8_t>& data, PwCommand& cmd) const {
@@ -114,7 +190,7 @@ bool Words::parseCommand(const std::vector<uint8_t>& data, PwCommand& cmd) const
     return true;
 }
 
-
+/*
 std::vector<uint8_t> Words::buildEnvelope(std::vector<uint16_t> route){
 
     //берет исходный пакет и переписывает в нем маршрут
@@ -154,28 +230,68 @@ std::vector<uint8_t> Words::buildEnvelope(std::vector<uint16_t> route){
 
 
 }
+*/
+std::vector<uint8_t> Words::buildEnvelope(std::vector<uint16_t> route, uint32_t uuid, uint8_t type) {
+    std::vector<uint8_t> envelope;
 
+    size_t routeSize = route.size();
+    if (routeSize > 255) routeSize = 255;
+
+    envelope.reserve(3 + 1 + 1 + (routeSize * 2) + 4);
+
+    // Magic
+    envelope.push_back('P');
+    envelope.push_back('W');
+    envelope.push_back(0x01);
+
+    // Envelope (тип пока 'F', изменится позже если нужно)
+    //envelope.push_back('F');
+    envelope.push_back(type);
+
+    // Route
+    envelope.push_back(static_cast<uint8_t>(routeSize));
+
+    for (size_t i = 0; i < routeSize; ++i) {
+        uint16_t addr = route[i];
+        envelope.push_back(static_cast<uint8_t>((addr >> 8) & 0xFF));
+        envelope.push_back(static_cast<uint8_t>(addr & 0xFF));
+    }
+
+    // ← ДОБАВИТЬ: записываем uuid в конверт
+    envelope.push_back(static_cast<uint8_t>((uuid >> 24) & 0xFF));
+    envelope.push_back(static_cast<uint8_t>((uuid >> 16) & 0xFF));
+    envelope.push_back(static_cast<uint8_t>((uuid >> 8)  & 0xFF));
+    envelope.push_back(static_cast<uint8_t>(uuid & 0xFF));
+
+    return envelope;
+}
+
+
+
+/*
+Структура пакета:
+
+Offset  Size    Field
+------  ----    -----
+P
+W
+0x01
+----------------------
+0       1       type = 'F'
+1       1       routeSize (количество узлов в маршруте)
+2       2*N     route[0..N-1] — MAC-адреса, каждый по 2 байта big-endian
+2+2N    2       origin (MAC изначального отправителя)
+4+2N    1       nameSize
+5+2N    N       name (имя файла)
+5+3N    4       uuid
+9+3N    1       totalParts
+
+*/
+
+/*
 std::vector<uint8_t> Words::buildMHFrame(const std::vector<uint16_t>& route, uint16_t origin, const std::string& name, uint32_t uuid, uint8_t totalParts, uint8_t part, const std::vector<uint8_t>& content){
 
-    /*
-    Структура пакета:
 
-    Offset  Size    Field
-    ------  ----    -----
-    P
-    W
-    0x01
-    ----------------------
-    0       1       type = 'F'
-    1       1       routeSize (количество узлов в маршруте)
-    2       2*N     route[0..N-1] — MAC-адреса, каждый по 2 байта big-endian
-    2+2N    2       origin (MAC изначального отправителя)
-    4+2N    1       nameSize
-    5+2N    N       name (имя файла)
-    5+3N    4       uuid
-    9+3N    1       totalParts
-
-    */
 
     std::vector<uint8_t> envelope = buildEnvelope(route);
 
@@ -195,28 +311,7 @@ std::vector<uint8_t> Words::buildMHFrame(const std::vector<uint16_t>& route, uin
     //frame.reserve(3 + 1 + 1 + (routeSize * 2) + 2 + 1 + nameSize + 4 + 2 + content.size());
 
     frame.reserve(envelope.size() + 2 + 1 + nameSize + 4 + 2 + content.size());
-    /*
-    // === Magic ===
-    // 3 bytes
-    frame.push_back('P');
-    frame.push_back('W');
-    frame.push_back(0x01);
 
-    // === Envelope ===
-    // type (1 байт)
-    frame.push_back('F'); // MultihopFile
-
-    // === Route (size 1 + route (адреса 16 бит, по 2 байта) ===
-    frame.push_back(static_cast<uint8_t>(routeSize));
-
-    // === ЦИКЛ ЗАПИСИ МАРШРУТА ===
-    // Каждый адрес route[i] = uint16_t → 2 байта в big-endian
-    for (size_t i = 0; i < routeSize; ++i) {
-        uint16_t addr = route[i];
-        frame.push_back(static_cast<uint8_t>((addr >> 8) & 0xFF)); // старший байт
-        frame.push_back(static_cast<uint8_t>(addr & 0xFF));         // младший байт
-    }
-    */
     frame.insert(frame.begin(), envelope.begin(), envelope.end());
 
     /////////////////////////////////////////////////////////////////////
@@ -242,6 +337,78 @@ std::vector<uint8_t> Words::buildMHFrame(const std::vector<uint16_t>& route, uin
 
     // === content ===
     frame.insert(frame.end(), content.begin(), content.end());
+
+    return frame;
+}
+*/
+
+std::vector<uint8_t> Words::buildMHFrame(
+    const std::vector<uint16_t>& route,
+    uint16_t origin,
+    const std::string& name,
+    uint32_t uuid,
+    uint8_t totalParts,
+    uint8_t part,
+    const std::vector<uint8_t>& content)
+{
+    // ← ИЗМЕНИТЬ: передаём uuid в buildEnvelope
+    std::vector<uint8_t> envelope = buildEnvelope(route, uuid);
+
+    std::vector<uint8_t> frame;
+    frame.insert(frame.begin(), envelope.begin(), envelope.end());
+
+    // origin (2 байта)
+    frame.push_back(static_cast<uint8_t>((origin >> 8) & 0xFF));
+    frame.push_back(static_cast<uint8_t>(origin & 0xFF));
+
+    // nameSize + name
+    size_t nameSize = name.size();
+    if (nameSize > 255) nameSize = 255;
+    frame.push_back(static_cast<uint8_t>(nameSize));
+    frame.insert(frame.end(), name.begin(), name.begin() + nameSize);
+
+    // ← ОСТАВИТЬ: uuid в нагрузке (будет зашифрован)
+    frame.push_back(static_cast<uint8_t>((uuid >> 24) & 0xFF));
+    frame.push_back(static_cast<uint8_t>((uuid >> 16) & 0xFF));
+    frame.push_back(static_cast<uint8_t>((uuid >> 8)  & 0xFF));
+    frame.push_back(static_cast<uint8_t>(uuid & 0xFF));
+
+    // totalParts + part
+    frame.push_back(totalParts);
+    frame.push_back(part);
+
+    // content
+    frame.insert(frame.end(), content.begin(), content.end());
+
+    return frame;
+}
+
+std::vector<uint8_t> Words::buildProofFrame(
+    const std::vector<uint16_t>& route,
+    uint32_t uuid,
+    const std::vector<uint8_t>& approvedParts,
+    bool final){
+
+    std::vector<uint8_t> envelope = buildEnvelope(route, uuid);
+
+    std::vector<uint8_t> frame;
+    frame.reserve(envelope.size() + 4 + approvedParts.size());
+
+    // Копируем envelope
+    frame.insert(frame.end(), envelope.begin(), envelope.end());
+
+    // Меняем тип на 'P' или 'p'
+    if(final) frame[3] = 'P';
+    else frame[3] = 'p';
+
+    // ← ДОБАВИТЬ: uuid в нагрузке (будет зашифрован)
+    frame.push_back(static_cast<uint8_t>((uuid >> 24) & 0xFF));
+    frame.push_back(static_cast<uint8_t>((uuid >> 16) & 0xFF));
+    frame.push_back(static_cast<uint8_t>((uuid >> 8)  & 0xFF));
+    frame.push_back(static_cast<uint8_t>(uuid & 0xFF));
+
+    // content (подтверждённые части)
+    frame.insert(frame.end(), approvedParts.begin(), approvedParts.end());
 
     return frame;
 }

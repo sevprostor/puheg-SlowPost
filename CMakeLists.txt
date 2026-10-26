@@ -32,6 +32,8 @@ add_executable(slowpost main.cpp
     routemanager.cpp
     address.h
     address.cpp
+    stats.h
+    stats.cpp
 )
 
 target_include_directories(slowpost PRIVATE ${ZSTD_INCLUDE_DIRS})

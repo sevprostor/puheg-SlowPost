@@ -19,23 +19,25 @@
 struct Envelope {
 
     char type = 0;
-
     std::vector <uint16_t> route;
+    uint32_t uuid; // копия uuid из нагрузки
 
+    // не входит в реальный пакет
     uint16_t lasthop = 0;
     uint16_t nexthop = 0;
     uint16_t fdest = 0;
 
 };
 
-// Пакет типа 'F' — чанк файла:
-//   origin (2 байта) | nameSize (1 байт) | name (nameSize) | uuid (3) | content (...)
+
+// origin (2 байта) | nameSize (1 байт) | name (nameSize) | uuid (3) | content (...)
 struct PwFile {
+
+    // Конверт - открытый текст
     Envelope   env;
 
-    uint16_t origin; // адрес изначального отправителя
-
-    //uint8_t    proofType  = 0; // убрать
+    // Нагрузка - шифруемая часть
+    uint16_t origin;
     std::string name;
     uint32_t   uuid       = 0;
     uint8_t    totalParts = 0;
@@ -84,7 +86,17 @@ public:
         uint8_t part,
         const std::vector<uint8_t>& content);
 
-    static std::vector<uint8_t> buildEnvelope(std::vector<uint16_t> route);
+    //static std::vector<uint8_t> buildEnvelope(std::vector<uint16_t> route, uint32_t uuid);
+    static std::vector<uint8_t> buildEnvelope(std::vector<uint16_t> route, uint32_t uuid, uint8_t type = 'F');
+
+
+
+    static std::vector<uint8_t> buildProofFrame(
+        const std::vector<uint16_t>& route,
+        uint32_t uuid,
+        const std::vector<uint8_t>& approvedParts,
+        bool final = false);
+
 
 
 

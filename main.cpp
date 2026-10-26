@@ -1,4 +1,4 @@
-#include "config.h"
+﻿#include "config.h"
 #include "transport.h"
 #include "log.h"      // <-- единый вывод
 #include "libs/json.hpp"
@@ -8,7 +8,7 @@
 #include "ebparser.h"
 #include "proof.h"
 #include "routemanager.h"
-
+#include "stats.h"
 #include "process.h"
 #include <string>
 #include <thread>
@@ -70,6 +70,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    Log::info("SlowPost", "***************************************************");
+    Log::info("SlowPost", "Puheg-SlowPost 0.0.1 build ", __DATE__, " ", __TIME__);
+    Log::info("SlowPost", "  + вынос uuid на конверт");
+    Log::info("SlowPost", "  + сохранение статистики входящих передач");
+    Log::info("SlowPost", "В работе:");
+    Log::info("SlowPost", "  * 1. сохранение исходящей статистики");
+    Log::info("SlowPost", "  2. сохранение маршрутов, инкремент попыток");
+    Log::info("SlowPost", "  3. сервисы");
+    Log::info("SlowPost", "***************************************************");
     Log::info("ListenWords", "Слушаю EventBus на порту ", config.eventBusPort, "...");
 
 
@@ -84,6 +93,8 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
         EBMessage emsg = transport.poll(100);
+        //uint64_t config.nowEpoch() = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+        //        std::chrono::system_clock::now().time_since_epoch()).count());
 
         //Слушать эвентбас, разбирать сообщение
         if (emsg.evenbus) EBParser::parseEmsg(emsg, file); //поправить название!
@@ -109,6 +120,9 @@ int main(int argc, char** argv) {
 
 
         // Если адресная книга загружена — сканируем outbox и отправляем файлы
+
+        Config::unhangBusy(config.nowEpoch());
+        RunningProcess::unhangProcess(config.nowEpoch());
 
         file.proofAvailableChunks(); //не пора ли отправить пруфы?
         //Выкинуть транзитный чанок в спул
@@ -153,14 +167,14 @@ int main(int argc, char** argv) {
         //if (!g_processActive) {
         if(!runningProc.running && !config.driverState.busy){
 
-            auto now = std::chrono::steady_clock::now();
+            //auto now = std::chrono::steady_clock::now();
             //auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastProcessComplete).count();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - runningProc.lastProcessCompleted).count();
+            //auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - runningProc.lastProcessCompleted).count();
+            uint64_t elapsed = config.nowEpoch() - runningProc.lastProcessCompleted;
 
             // Задержка: sendTXDelay + random(0..sendTXDelay)
             static std::random_device rd;
             static std::mt19937 gen(rd());
-            //int rndizer = config.sendTXDelay + (gen() % config.sendTXDelay);
             int rndizer = gen() % 1000;
 
             ////////////////////////////////////////////////////
@@ -168,7 +182,9 @@ int main(int argc, char** argv) {
             /// Начало рабочего такта отправки
             ///
 
-            if (elapsed >= config.sendTXDelay + (rndizer * 5)) {
+            // от половины до полутора делеев
+
+            if (elapsed >= config.sendTXDelay / 2 + ((rndizer * config.sendTXDelay) / 1000)) {
 
 
                 // Удаляем .pwp с retries > maxProcessRetries
@@ -189,10 +205,7 @@ int main(int argc, char** argv) {
                 pwpFiles = file.getPwpFiles();
 
                 if (!pwpFiles.empty()) {
-                    // Получаем текущее время в формате epoch (секунды)
-                    uint64_t nowEpoch = static_cast<uint64_t>(
-                        std::chrono::duration_cast<std::chrono::seconds>(
-                            std::chrono::system_clock::now().time_since_epoch()).count());
+
 
                     // Ищем первый .pwp, который можно отправить
                     const File::PwpFile* toSend = nullptr;
@@ -205,32 +218,29 @@ int main(int argc, char** argv) {
                         } else {
                             // Ретрай — проверяем задержку
 
-                            int r = rndizer / 50;
-                            uint64_t minSendTime = pwp.timeCreated + config.sendRetryDelay + r;
+                            uint64_t minSendTime = pwp.timeCreated + config.sendRetryDelay;
                             static bool printed = false;
 
-                            if (nowEpoch >= minSendTime ){
+                            if (config.nowEpoch() >= minSendTime ){
                                 toSend = &pwp;
                                 break;
                             } else {
                                 // Ещё рано, пропускаем этот файл
 
-                                uint64_t waitSeconds = minSendTime - nowEpoch;
+                                uint64_t waitSeconds = minSendTime - config.nowEpoch();
 
                                 if(!printed){
 
                                     printed = true;
-                                    Log::info("ListenWords", "⏳ Ретрай ", pwp.path.filename().string(),
-                                          ": ждём ещё примерно", waitSeconds, "с");
+                                    Log::info("Main", pwp.path.filename().string(),
+                                          ": ретрай, отправка через ", waitSeconds, "с");
                                 }
                             }
                         }
                     }
 
-                    if (!toSend) {
-                        // Нет файлов, готовых к отправке (все ждут задержки)
-                        // Продолжаем цикл, попробуем в следующей итерации
-                    } else {
+
+                    if(toSend && !config.driverState.busy){
                         const auto& oldest = *toSend;
 
                         // Читаем содержимое .pwp
@@ -240,18 +250,39 @@ int main(int argc, char** argv) {
                                                         std::istreambuf_iterator<char>());
                             in.close();
 
+                            Words words;
+
+                            // распарсить конверт, чтоб запомнить в процессе тип
+                            Envelope sentEnv;
+                            std::vector<uint8_t> body(packet.begin() + 3, packet.end());
+
+                            size_t esize = words.parseEnv(body, sentEnv);
+                            //uint16_t chunkSize = body.size() - 3 - esize;
+                            uint16_t peer = sentEnv.fdest;
+
                             // Отправляем
+                            // Не отправлять, если идет прием или передача
                             if (transport.sendFrame(oldest.destIp, packet)) {
-                                Log::info("ListenWords", "📤 Отправлен .pwp: ", oldest.path.filename().string(),
-                                          " (part ", oldest.part + 1, "/", oldest.total,
-                                          ", uuid=", oldest.uuid,
-                                          oldest.retries > 0 ? ", retry=" + std::to_string(oldest.retries) : "",
+                                Log::info("Main", oldest.path.filename().string(), " отправлен в адаптер: ",
+                                          body.size() - 3 - esize, " байт, part ",
+                                          oldest.part + 1, "/", oldest.total,
+                                          ", uuid ", oldest.uuid,
+                                          ", peer ", std::to_string(peer),
+                                          oldest.retries > 0 ? ", retry " + std::to_string(oldest.retries) : "",
                                           ")");
 
                                 // Начать новый процесс
                                 runningProc.processingUUID = oldest.uuid;
+                                runningProc.processingFile = oldest.path.filename();
+                                runningProc.peerMAC = peer;
+                                runningProc.fileSize = body.size() - 3 - esize;
+                                runningProc.processingType = sentEnv.type;
                                 runningProc.running = true;
                                 runningProc.state = "";
+                                runningProc.lastActivity = config.nowEpoch();
+                                runningProc.startTime = config.nowEpoch();
+                                //runningProc.lastActivity = std::chrono::steady_clock::now(); //добавлено время запуска
+
                             } else {
                                 Log::error("ListenWords", "❌ Ошибка отправки .pwp");
                             }
@@ -262,83 +293,101 @@ int main(int argc, char** argv) {
 
 
         } else {
+
+            ////////////////////////////////////////////////////////////////////////
+            /// Добавить сброс, если процесс не стартовал в течение 1 секунды.
+            /// Переотправка произойдет сама штатными средствами
+
+            //auto now = std::chrono::steady_clock::now();
+            //auto wasActive = std::chrono::duration_cast<std::chrono::milliseconds>(now - runningProc.lastActivity).count();
+
+            uint64_t wasActive = config.nowEpoch() - runningProc.lastActivity;
+
+            //Сброс, если зупущен новый процесс, но дреайвер или адаптер не отозвались
+            //if (runningProc.running && !runningProc.accepted && wasActive > 5000){
+
+            if (runningProc.running && !runningProc.accepted && wasActive > 5){
+                //runningProc.running = false;
+                runningProc.state = "FAIL";
+                Log::error("Main", "Процесс не стартовал, сброс");
+
+            }
+
+            ////////////////////////////////////////////////////////////////////////
+
             // Процесс активен — проверяем завершение
-            //if (g_processState == "OK" || g_processState == "FAIL") {
-            if (runningProc.state == "OK" || runningProc.state == "FAIL") {
-                //g_lastProcessComplete = std::chrono::steady_clock::now();
-                runningProc.lastProcessCompleted = std::chrono::steady_clock::now();
-                //g_processActive = false;
-                runningProc.running = false;
+            if (runningProc.state == "OK" || runningProc.state == "FAIL" || runningProc.state == "WORK") {
+
+
+                //runningProc.lastProcessCompleted = std::chrono::steady_clock::now();
+                runningProc.lastProcessCompleted = config.nowEpoch();
 
                 // Находим соответствующий .pwp
                 auto pwpFiles = file.getPwpFiles();
                 for (const auto& pwp : pwpFiles) {
 
-                    Log::info("ListenWords", "смотрим pwp - ", pwp.uuid, " proc - ", runningProc.thread);
+                    Log::info("Main", "uuid ", pwp.uuid,
+                              ", state ", runningProc.state,
+                              ", procUUID ", std::to_string(runningProc.processingUUID),
+                              ", thread ", runningProc.thread,
+                              ", file ", runningProc.processingFile.string(),
+                              ", type ", runningProc.processingType);
 
 
                     if (pwp.uuid == runningProc.processingUUID) {
 
+                        //Если процесс только что запущен, присвоить статус принятого
+                        if (!runningProc.accepted){
 
+                            runningProc.accepted = true;
+                            runningProc.lastActivity = config.nowEpoch();
+                        }
 
                         //Если процесс завершился неудачей, то переименовать ретрай и больше ничего не делать
                         if (runningProc.state == "FAIL"){
+                            runningProc.running = false;
+
+                            Log::fail("Main", pwp.path.filename().string(), " не отправлен");
                             file.incrementPwpRetry(pwp.path);
+
+
                         }
 
 
 
                         if (runningProc.state == "OK") {
 
+                            runningProc.running = false;
 
-                            Log::info("SlowPost", "✅ .pwp успешно отправлен: ",
-                                      pwp.path.filename().string());
+                            Log::success("Main", pwp.path.filename().string(), " отправлен");
 
                             // === ПРОВЕРКА: это файл пруфа? ===
                             // Рекурсивно ищем <uuid>.pwproof в outbox/
                             // (с учётом маршрутизации pwp.destIp ≠ origin)
+
                             fs::path outboxDir = fs::path(config.workDir) /
                                                  (config.myContact.ip.empty() ? "unknown" : config.myContact.ip) /
                                                  "outbox";
 
                             std::error_code ec;
-                            bool isProofFile = false;
-                            fs::path proofPath;
 
-                            std::string targetName = std::to_string(pwp.uuid) + ".pwproof";
 
-                            // Рекурсивный поиск файла <uuid>.pwproof в outbox/
-                            std::function<bool(const fs::path&)> searchProof =
-                                [&](const fs::path& dir) -> bool {
-                                if (!fs::exists(dir, ec)) return false;
+                            if (runningProc.processingType == 'P' || runningProc.processingType == 'p') {
+                                Log::debug("Main", "Успешно отправлен пруф типа '",
+                                           runningProc.processingType, "'", std::to_string(runningProc.processingUUID));
 
-                                for (const auto& entry : fs::directory_iterator(dir, ec)) {
-                                    if (entry.is_directory()) {
-                                        if (searchProof(entry.path())) return true;
-                                    } else if (entry.is_regular_file() &&
-                                               entry.path().filename() == targetName) {
-                                        proofPath = entry.path();
-                                        return true;
-                                    }
-                                }
-                                return false;
-                            };
+                                // При отправке пруфа на него мы не ждем никаких подтверждений.
+                                // Поэтому, как только пакет успешно отправился, мы проверяем inbox -
+                                // закончился ли прием этой передачи, на которую послан пруф
 
-                            isProofFile = searchProof(outboxDir);
+                                Proof::cleanInbox(pwp.uuid);
 
-                            if (isProofFile) {
-                                Log::info("SlowPost", "📋 Это файл пруфа: ",
-                                          proofPath.string());
-
-                                std::vector<uint8_t> parts;
-                                parts.emplace_back(pwp.part);
-                                Proof::processIncomingProof(pwp.uuid, parts);
-                            } //else {
-                                //Log::info("SlowPost", "⏳ Ожидание пруфа от получателя");
-                            //}
+                            }
 
                             file.removePwp(pwp.path);
                         }
+
+                        Statistics::updateOutgoingStats();
 
                         break;
                     }

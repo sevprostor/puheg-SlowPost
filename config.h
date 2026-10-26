@@ -5,22 +5,49 @@
 #include <cstdint>
 #include <vector>
 
-
+#define MAX_CHUNKS 255
 
 struct Config {
+
+
+
     uint16_t eventBusPort = 9400;
     std::string workDir = "./";
     std::string configPath = "pclient.conf";
 
-    // НОВОЕ: параметры отправки
-    int sendTXDelay = 15000; // задержка между отправками (мс)
+    /////////////////////////////////////////////////
+    /// \brief configVariables
+    /// Параметры, которые будут искаться в .conf, по сути это
+    /// имена переменных ниже.
+    ///
+    /// Потом можно придумать что половчее
+
+    std::vector<std::string> configVariables = {
+        "sendTXDelay",
+        "maxProcessRetries",
+        "sendRetryDelay",
+        "sendProofDelay",
+        "compressionLevel",
+        "chunkSize",
+        "maxTransfers"
+    };
+
+    ///////////////////////////////////////////////////////////
+    ///
+    /// ПАРАМЕТРЫ ПРОГРАММЫ
+    ///
+
+    int sendTXDelay = 30; // от 15 до 45 задержка между отправками, сек. С рандомизатором +-50%
     int maxProcessRetries = 7; // максимальное количество ретраев
     int sendRetryDelay = 90; // ретраи раз в 2 минуты
     int sendProofDelay = 120; // пруф раз в 3 минуты
     int compressionLevel = 6;
-
     uint16_t chunkSize = 1500;
     uint8_t maxTransfers = 4;
+
+    uint16_t unhangBusyTimeout = 10; // таймаут отклечения DriverState.busy
+    uint16_t unhangProcessTimeout = 240; // таймаут отклечения DriverState.busy
+    //новое дописывать вниз, чтоы проще добавлять в configVariables
 
     struct abc{
         uint16_t mac;
@@ -40,6 +67,7 @@ struct Config {
 
     struct DriverState{
         bool busy = false;
+        uint64_t busySince;
         bool RX = false;
         bool TX = false;
         bool process;
@@ -50,6 +78,14 @@ struct Config {
     } driverState;
 
     uint16_t proofTimeout = 1200; //20 минут ждем пруфа
+
+
+    static bool unhangBusy(uint64_t);
+
+    uint64_t nowEpoch();
+
+
+
 };
 
 extern Config config;

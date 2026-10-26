@@ -24,7 +24,7 @@ public:
     static bool isTransmissionCompleted(uint32_t uuid);
     /////////////////////////////////////////////
 
-    static bool sendFileProof(std::string senderIp, uint32_t uuid, std::vector<int>& parts);
+    static bool sendFileProof(std::string senderIp, uint32_t uuid, std::vector<int>& parts, bool final);
 
 
     // Переносит подтверждённые чанки из waiting/ в approved/
